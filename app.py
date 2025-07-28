@@ -1,52 +1,31 @@
-# app.py
 import pandas as pd
 from haversine import haversine
 import streamlit as st
+import pgeocode
 import re
 
-# ─────────────────────────────────────────────────────────────
-# 1.  Cargar y limpiar la base UNESPA
-# ─────────────────────────────────────────────────────────────
-FILE_CSV = "centros_unespa_geo.csv"   # el fichero que acabas de generar
-
-df = pd.read_csv(FILE_CSV)
-
-# --- Limpieza mínima ---
-# • Extraer primer bloque de 5 dígitos (ignora “00nan”, espacios, etc.)
-df["CPOSTAL"] = (
-    df["CPOSTAL"]
-    .astype(str)
-    .str.extract(r"(\d{5})")          # solo los 5 primeros dígitos consecutivos
-    .fillna("")                       # NaN → ""
-)
-
-# • Normalizar lat/lon (a veces están vacíos)
+# ── 1. Cargar lista de centros ──────────────────────────────────────────────
+df = pd.read_csv("centros_unespa_geo.csv")
 df["lat"] = pd.to_numeric(df["lat"], errors="coerce")
 df["lon"] = pd.to_numeric(df["lon"], errors="coerce")
-df = df.dropna(subset=["lat", "lon", "CPOSTAL"])       # fuera filas incompletas
+df = df.dropna(subset=["lat", "lon"])                # centros con coordenadas
 
-# --- Garantizar CPOSTAL único (media de coordenadas si hay varios) ---
-df_uni = df.groupby("CPOSTAL", as_index=False)[["lat", "lon"]].mean()
-cp_coords = df_uni.set_index("CPOSTAL")                 # para búsquedas rápidas
+# ── 2. Geocodificador offline para CP de pacientes ──────────────────────────
+nomi = pgeocode.Nominatim("es")                      # base GeoNames local
 
-# ─────────────────────────────────────────────────────────────
-# 2.  Lógica de negocio
-# ─────────────────────────────────────────────────────────────
-def lookup_cp(cp: str):
-    """Devuelve [lat, lon] del CP o None si no existe."""
-    try:
-        lat, lon = cp_coords.loc[cp]
-        return [lat, lon]
-    except KeyError:
+def geocode_cp(cp: str):
+    """Devuelve (lat, lon) o None si el CP no existe en GeoNames."""
+    q = nomi.query_postal_code(cp)
+    if pd.isna(q.latitude):
         return None
+    return float(q.latitude), float(q.longitude)
 
+# ── 3. Lógica de búsqueda ───────────────────────────────────────────────────
 def nearest_center(patient_cp: str):
-    """Devuelve (fila_centro, distancia_km) del centro más próximo."""
-    coords = lookup_cp(patient_cp)
+    coords = geocode_cp(patient_cp)
     if coords is None:
-        raise ValueError("CP no encontrado en la base UNESPA")
+        raise ValueError("CP no reconocido en GeoNames")
 
-    # Distancia a todos los centros con datos válidos
     distances = df.apply(
         lambda r: haversine(coords, (r.lat, r.lon)),
         axis=1,
@@ -54,20 +33,17 @@ def nearest_center(patient_cp: str):
     idx = distances.idxmin()
     return df.loc[idx], distances.loc[idx]
 
-# ─────────────────────────────────────────────────────────────
-# 3.  Interfaz Streamlit
-# ─────────────────────────────────────────────────────────────
+# ── 4. UI Streamlit ─────────────────────────────────────────────────────────
 st.set_page_config(page_title="Buscador UNESPA", page_icon="🚑", layout="centered")
 st.title("🚑 Buscador UNESPA")
 st.markdown(
-    "Introduce el **código postal** del paciente para obtener el centro "
-    "adherido al convenio UNESPA más cercano."
+    "Introduce el **código postal** del paciente para ver el centro UNESPA más cercano."
 )
 
 cp_input = st.text_input("Código postal", max_chars=5, placeholder="28042")
 
 if cp_input:
-    cp = re.sub(r"\D", "", cp_input)[:5].zfill(5)   # limpia y formatea a 5 dígitos
+    cp = re.sub(r"\D", "", cp_input)[:5].zfill(5)
     try:
         centro, km = nearest_center(cp)
         st.success(f"**{centro['CENTRO']}** — {km:.1f} km")
